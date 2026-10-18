@@ -342,94 +342,66 @@ async fn render_tidy_ui_handler(State(renames): State<Arc<Vec<RenameItem>>>) -> 
 }
 
 fn generate_tidy_html(items: &[RenameItem]) -> String {
-    // Embed the JSON inside a <script type="application/json"> tag and read it via textContent.
     let json_data = serde_json::to_string(items).unwrap();
     let safe_json = escape_json_for_script(&json_data);
     let template = r##"
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JD Tidy</title>
-    <style>
-        body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 10px; }
-        .file-row { background: #222; padding: 10px; margin-bottom: 10px; border-radius: 4px; border-left: 4px solid #ff9900; }
-        .old-name { color: #888; font-size: 12px; margin-bottom: 5px; word-wrap: break-word; }
-        input { width: 100%; padding: 8px; background: #111; color: #00ccff; border: 1px solid #444; font-family: monospace; border-radius: 4px; box-sizing: border-box; }
-        button { background: #00ccff; color: #000; border: none; padding: 12px; font-weight: bold; cursor: pointer; border-radius: 4px; width: 100%; font-size: 16px; margin-bottom: 20px; }
-        #output { display: none; margin-top: 20px; background: #000; padding: 15px; border: 1px solid #444; overflow-x: auto; color: #00ff00; font-size: 12px; white-space: pre-wrap; }
-    </style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JD Tidy</title>
 </head>
 <body>
-    <h2>Tidy Library</h2>
-    <p style="color: #888; font-size: 12px;">Review the proposed names below. Edit them freely, then click Export.</p>
-    <button id="exportBtn">Export Rename Script</button>
+  <header>
+    <h1>JD Tidy</h1>
+    <div>
+      <button id="exportBtn" type="button">Export Rename Script</button>
+    </div>
+  </header>
 
-    <div id="list"></div>
-    <div id="output"></div>
+  <main>
+    <ul id="tidy-list" role="list"></ul>
+    <pre id="output" hidden></pre>
+  </main>
 
-    <script id="tidy-data" type="application/json">JSON_DATA_HERE</script>
-    <script>
-        const items = JSON.parse(document.getElementById('tidy-data').textContent || '[]');
-        const list = document.getElementById('list');
-        const exportBtn = document.getElementById('exportBtn');
+  <script id="tidy-data" type="application/json">JSON_DATA_HERE</script>
+  <script>
+  (function(){
+    const items = JSON.parse(document.getElementById('tidy-data').textContent || '[]');
+    const list = document.getElementById('tidy-list');
+    function makeNode(item, idx){
+      const li = document.createElement('li');
+      li.dataset.idx = String(idx);
 
-        function renderList() {
-            list.innerHTML = '';
-            if (items.length === 0) {
-                const p = document.createElement('div');
-                p.style.color = '#888';
-                p.textContent = '(No files to tidy)';
-                list.appendChild(p);
-                return;
-            }
+      const old = document.createElement('div');
+      old.textContent = item.old_path;
 
-            items.forEach((item, index) => {
-                const row = document.createElement('div');
-                row.className = 'file-row';
+      const input = document.createElement('input');
+      input.value = item.new_name || '';
 
-                const oldDiv = document.createElement('div');
-                oldDiv.className = 'old-name';
-                oldDiv.textContent = item.old_path;
+      const btn = document.createElement('button');
+      btn.textContent = 'Apply';
+      btn.type = 'button';
+      btn.addEventListener('click', () => { item.new_name = input.value; });
 
-                const input = document.createElement('input');
-                input.type = 'text';
-                input.id = `input-${index}`;
-                input.value = item.new_name;
-
-                row.appendChild(oldDiv);
-                row.appendChild(input);
-                list.appendChild(row);
-            });
-        }
-
-        async function generateScript() {
-            exportBtn.textContent = 'Generating...';
-            items.forEach((item, index) => {
-                const el = document.getElementById(`input-${index}`);
-                if (el) item.new_name = el.value;
-            });
-            try {
-                const res = await fetch('/api/export_tidy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(items)
-                });
-                const scriptText = await res.text();
-                const output = document.getElementById('output');
-                output.textContent = scriptText;
-                output.style.display = 'block';
-                exportBtn.textContent = 'Export Rename Script';
-            } catch (e) {
-                alert('Failed to generate script.');
-                exportBtn.textContent = 'Export Rename Script';
-            }
-        }
-
-        exportBtn.addEventListener('click', generateScript);
-        renderList();
-    </script>
+      li.appendChild(old);
+      li.appendChild(document.createTextNode(' '));
+      li.appendChild(input);
+      li.appendChild(document.createTextNode(' '));
+      li.appendChild(btn);
+      return li;
+    }
+    items.forEach((it,i) => list.appendChild(makeNode(it,i)));
+    document.getElementById('exportBtn').addEventListener('click', async ()=>{
+      const res = await fetch('/api/export_tidy', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(items)
+      });
+      const txt = await res.text();
+      const out = document.getElementById('output'); out.textContent = txt; out.hidden = false;
+    });
+  })();
+  </script>
 </body>
 </html>
 "##;
@@ -439,376 +411,161 @@ fn generate_tidy_html(items: &[RenameItem]) -> String {
 fn generate_html(json_data: &str) -> String {
     let safe_json = escape_json_for_script(json_data);
     let template = r##"
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JD Wrangler</title>
-    <style>
-        body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 10px; margin: 0; padding-bottom: 60px; }
-        .header { display: flex; justify-content: space-between; align-items: center; padding: 10px; }
-        .meta-drawer { background: #111; border: 1px solid #444; border-radius: 8px; margin-bottom: 20px; padding: 10px; }
-        .meta-drawer summary { cursor: pointer; color: #ff9900; font-weight: bold; font-size: 14px; }
-        .meta-list { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
-
-        .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
-        .shelf { display: flex; flex-direction: column; gap: 5px; }
-        .shelf-box { border: 2px dashed #444; padding: 8px; border-radius: 8px; background: #222; flex: 1; display: flex; flex-direction: column; }
-        
-        .shelf-header { margin-bottom: 10px; text-align: center; }
-        .shelf-header select { background: transparent; color: #00ccff; border: none; font-family: monospace; font-size: 14px; font-weight: bold; cursor: pointer; outline: none; text-align: center; }
-        
-        .slot { flex: 1; min-height: 60px; border: 1px dashed #333; margin-bottom: 8px; border-radius: 4px; display: flex; flex-direction: column; justify-content: center; cursor: pointer; padding: 4px; }
-        .slot:hover { background: #2a2a2a; }
-        .slot.locked { cursor: default; border-style: solid; }
-        .slot.locked:hover { background: transparent; }
-        
-        .item { background: #333; padding: 8px; border-radius: 4px; width: 100%; border-left: 4px solid #00ccff; font-size: 12px; box-sizing: border-box; display: flex; justify-content: space-between; }
-        .item.selected { border: 2px solid #00ff00; background: #1a331a; }
-        .item-content { flex: 1; min-width: 0; cursor: pointer; }
-        .item span.id { color: #00ccff; font-weight: bold; display: block; margin-bottom: 4px; font-size: 14px; }
-        .item span.title { word-break: break-word; line-height: 1.3; }
-        
-        .btn-select { background: none; border: none; color: #888; cursor: pointer; font-size: 16px; padding: 0 0 0 5px; }
-        .btn-select:hover { color: #fff; }
-        
-        .pool { background: #111; border: 1px solid #444; padding: 10px; border-radius: 8px; margin-bottom: 15px; max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 8px; }
-        .pool .item { width: auto; flex: 1 1 250px; border-left-color: #888; }
-        .pool-title { color: #666; width: 100%; font-size: 14px; margin-bottom: 5px; }
-        
-        button.export { background: #00ccff; color: #000; border: none; padding: 10px 15px; font-weight: bold; cursor: pointer; border-radius: 4px; font-size: 14px; }
-        
-        .area-personal { border-left-color: #00ccff !important; }
-        .area-cs { border-left-color: #00ff00 !important; }
-        .area-math { border-left-color: #ff00ff !important; }
-        .area-system { border-left-color: #ff9900 !important; background: #2a1f16; }
-
-        #stats-bar { position: fixed; bottom: 0; left: 0; width: 100%; background: #222; border-top: 2px solid #444; color: #888; font-size: 12px; display: flex; justify-content: space-around; padding: 8px 0; }
-        #stats-bar span { color: #fff; font-weight: bold; }
-
-        #modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(17,17,17,0.95); z-index: 100; flex-direction: column; padding: 15px; box-sizing: border-box; }
-        #modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 2px solid #444; padding-bottom: 10px; }
-        #modal-title { color: #00ccff; font-weight: bold; font-size: 18px; }
-        #modal-close { background: #ff4444; color: #fff; border: none; padding: 8px 12px; border-radius: 4px; font-weight: bold; cursor: pointer; }
-        .file-item { padding: 10px; background: #222; margin-bottom: 5px; border-radius: 4px; border-left: 2px solid #666; }
-        .folder-item { padding: 10px; background: #222; margin-bottom: 5px; border-radius: 4px; border-left: 2px solid #00ccff; cursor: pointer; }
-        .folder-item:hover { background: #333; }
-    </style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JD Wrangler</title>
 </head>
 <body>
-    <script id="state-data" type="application/json">JSON_DATA_HERE</script>
-
-    <div class="header">
-        <h2>JD Wrangler</h2>
-        <button class="export" id="exportBtn">Export</button>
+  <header>
+    <h1 id="app-title">JD Wrangler</h1>
+    <div id="controls">
+      <button id="exportBtn" type="button">Export</button>
     </div>
+  </header>
 
-    <details class="meta-drawer" open>
-        <summary>00-09 System Management</summary>
-        <div class="meta-list" id="meta-list"></div>
-    </details>
+  <main id="app">
+    <section id="system-management" aria-labelledby="sys-heading">
+      <h2 id="sys-heading">00-09 System Management</h2>
+      <ul id="meta-list" role="list"></ul>
+    </section>
 
-    <div class="pool" id="pool" onclick="placeItem(-1)">
-        <div class="pool-title">Unassigned Items</div>
+    <section id="unassigned" aria-labelledby="pool-heading">
+      <h2 id="pool-heading">Unassigned Items</h2>
+      <ul id="pool" role="list"></ul>
+    </section>
+
+    <section id="shelves" aria-labelledby="shelves-heading">
+      <h2 id="shelves-heading" hidden>Library Shelves</h2>
+      <div id="shelf-list" role="list"></div>
+    </section>
+  </main>
+
+  <footer>
+    <div id="stats">
+      <span>Areas: <strong id="stat-areas">0</strong></span>
+      <span>Categories: <strong id="stat-cats">0</strong></span>
+      <span>IDs: <strong id="stat-ids">0</strong></span>
+      <span>Files: <strong id="stat-files">0</strong></span>
     </div>
+  </footer>
 
-    <div class="grid" id="grid"></div>
-    
-    <div id="stats-bar">
-        <div>Areas: <span id="stat-areas">0</span></div>
-        <div>Categories: <span id="stat-cats">0</span></div>
-        <div>IDs: <span id="stat-ids">0</span></div>
-        <div>Files: <span id="stat-files">0</span></div>
-    </div>
+  <script id="state-data" type="application/json">JSON_DATA_HERE</script>
 
-    <div id="output" style="display:none; margin-top:20px; background:#000; padding:15px; border:1px solid #444; color:#00ff00; white-space:pre-wrap; font-size:12px;"></div>
+  <script>
+  // Minimal, style-free renderer. Renders semantic lists and uses data-* attributes.
+  (function(){
+    const state = JSON.parse(document.getElementById('state-data').textContent || '{"items":[]}');
+    const SHELF_COUNT = __SHELF_COUNT__;
+    const SLOTS_PER_SHELF = __SLOTS_PER_SHELF__;
 
-    <div id="modal">
-        <div id="modal-header">
-            <div id="modal-title">Folder</div>
-            <button id="modal-close" onclick="closeModal()">Close</button>
-        </div>
-        <div id="modal-content" style="padding-bottom: 50px;"></div>
-    </div>
+    function qs(id){ return document.getElementById(id); }
 
-    <script>
-        const state = JSON.parse(document.getElementById('state-data').textContent || '{"items":[]}');
+    function makeItemNode(item){
+      const li = document.createElement('li');
+      li.setAttribute('role','listitem');
+      li.dataset.jdid = item.id || '';
+      li.dataset.level = item.level || '';
+      li.dataset.physical = String(item.physical_loc || 0);
+      li.dataset.path = item.original_path || '';
 
-        const SHELF_COUNT = __SHELF_COUNT__;
-        const SLOTS_PER_SHELF = __SLOTS_PER_SHELF__;
+      const idSpan = document.createElement('span');
+      idSpan.dataset.part = 'id';
+      idSpan.textContent = item.id || '';
 
-        const areas = [...new Set(state.items.filter(i => i.level === 'area' && !i.title.includes('System')).map(i => i.original_path))].sort();
-        let shelfPaths = [areas[0], areas[1], areas[2]];
-        let selectedItemId = null;
+      const titleSpan = document.createElement('span');
+      titleSpan.dataset.part = 'title';
+      titleSpan.textContent = item.title || item.original_path || '';
 
-        state.items.forEach(i => { if (i.title) i.title = i.title.replace(/\s+/g, ' ').trim(); });
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Select';
+      btn.addEventListener('click', () => {
+        if (li.hasAttribute('data-selected')) li.removeAttribute('data-selected');
+        else li.setAttribute('data-selected', '1');
+      });
 
-        function updateStats() {
-            document.getElementById('stat-areas').textContent = state.items.filter(i => i.level === 'area').length;
-            document.getElementById('stat-cats').textContent = state.items.filter(i => i.level === 'category').length;
-            document.getElementById('stat-ids').textContent = state.items.filter(i => i.level === 'id').length;
-            document.getElementById('stat-files').textContent = state.items.filter(i => i.is_file).length;
+      li.appendChild(idSpan);
+      li.appendChild(document.createTextNode(' '));
+      li.appendChild(titleSpan);
+      li.appendChild(document.createTextNode(' '));
+      li.appendChild(btn);
+      return li;
+    }
+
+    function renderMeta(){
+      const metaList = qs('meta-list');
+      metaList.innerHTML = '';
+      const sysArea = state.items.find(i => i.level === 'area' && i.title && i.title.includes('System'));
+      if (!sysArea) return;
+      const children = state.items.filter(i => i.parent_path === sysArea.original_path);
+      children.forEach(c => metaList.appendChild(makeItemNode(c)));
+    }
+
+    function renderPool(){
+      const pool = qs('pool');
+      pool.innerHTML = '';
+      const sysArea = state.items.find(i => i.level === 'area' && i.title && i.title.includes('System'));
+      const unassigned = state.items.filter(i => (i.level === 'category' || i.level === 'id') && i.physical_loc === 0 && (!sysArea || i.area !== sysArea.original_path));
+      unassigned.forEach(u => pool.appendChild(makeItemNode(u)));
+    }
+
+    function renderShelves(){
+      const shelfList = qs('shelf-list');
+      shelfList.innerHTML = '';
+      for (let s = 0; s < SHELF_COUNT; s++){
+        const section = document.createElement('section');
+        section.dataset.shelfIndex = String(s);
+        const heading = document.createElement('h3');
+        heading.textContent = `Shelf ${s+1}`;
+        section.appendChild(heading);
+
+        const ol = document.createElement('ol');
+        ol.setAttribute('role','list');
+        ol.dataset.slotCount = String(SLOTS_PER_SHELF);
+
+        for (let r = 0; r < SLOTS_PER_SHELF; r++){
+          const slotIndex = s * SLOTS_PER_SHELF + r;
+          const li = document.createElement('li');
+          li.dataset.slotIndex = String(slotIndex + 1);
+          li.dataset.row = String(r + 1);
+          const item = state.items.find(i => i.physical_loc === slotIndex + 1 && (i.level === 'category' || i.level === 'id'));
+          if (item) li.appendChild(makeItemNode(item));
+          ol.appendChild(li);
         }
+        section.appendChild(ol);
+        shelfList.appendChild(section);
+      }
+    }
 
-        function getAreaClass(areaPath) {
-            if (!areaPath) return "";
-            if (areaPath.includes("Personal")) return "area-personal";
-            if (areaPath.includes("CS")) return "area-cs";
-            if (areaPath.includes("Math")) return "area-math";
-            if (areaPath.includes("System")) return "area-system";
-            return "";
-        }
+    function updateStats(){
+      qs('stat-areas').textContent = String(state.items.filter(i=>i.level==='area').length);
+      qs('stat-cats').textContent = String(state.items.filter(i=>i.level==='category').length);
+      qs('stat-ids').textContent = String(state.items.filter(i=>i.level==='id').length);
+      qs('stat-files').textContent = String(state.items.filter(i=>i.is_file).length);
+    }
 
-        function createText(tag, className, text) {
-            const el = document.createElement(tag);
-            if (className) el.className = className;
-            el.textContent = text;
-            return el;
-        }
+    qs('exportBtn').addEventListener('click', async () => {
+      const res = await fetch('/api/export', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(state)
+      });
+      const txt = await res.text();
+      alert(txt);
+    });
 
-        function getDisplayId(item) {
-            if (item.physical_loc > 0 && (item.level === 'category' || item.level === 'id')) {
-                const slot_index = item.physical_loc - 1;
-                const decade = Math.floor(slot_index / SLOTS_PER_SHELF) + 1;
-                const row = (slot_index % SLOTS_PER_SHELF);
-                if (item.level === 'category') {
-                    return `${decade}${row}`;
-                } else {
-                    return `${decade}${row}.${item.id.split('.')[1] || '00'}`;
-                }
-            }
-            return item.id;
-        }
-
-        function render() {
-            updateStats();
-            const metaList = document.getElementById('meta-list');
-            metaList.innerHTML = '';
-            const sysArea = state.items.find(i => i.level === 'area' && i.title.includes('System'));
-            if (sysArea) {
-                const sysChildren = state.items.filter(i => i.parent_path === sysArea.original_path);
-                sysChildren.sort((a,b) => a.id.localeCompare(b.id));
-                sysChildren.forEach(item => metaList.appendChild(createItemElement(item, false)));
-            }
-
-            const pool = document.getElementById('pool');
-            // clear pool but keep title
-            Array.from(pool.children).forEach((c, idx) => { if (!c.classList || !c.classList.contains('pool-title')) c.remove(); });
-            const unassigned = state.items.filter(i => i.physical_loc === 0 && (i.level === 'category' || i.level === 'id') && (!sysArea || i.area !== sysArea.original_path));
-            if (unassigned.length === 0) {
-                const span = createText('div', null, '(All placed)');
-                span.style.color = '#444';
-                pool.appendChild(span);
-            } else {
-                unassigned.forEach(item => pool.appendChild(createItemElement(item, false)));
-            }
-
-            const grid = document.getElementById('grid');
-            grid.innerHTML = '';
-
-            for (let s = 0; s < SHELF_COUNT; s++) {
-                const shelfContainer = document.createElement('div');
-                shelfContainer.className = 'shelf';
-                const areaPath = shelfPaths[s];
-                if (!areaPath) continue;
-
-                const shelfBox = document.createElement('div');
-                shelfBox.className = 'shelf-box';
-
-                const header = document.createElement('div');
-                header.className = 'shelf-header';
-                const select = document.createElement('select');
-                const defaultOpt = document.createElement('option');
-                defaultOpt.value = '';
-                defaultOpt.textContent = '-- Select Area --';
-                select.appendChild(defaultOpt);
-                areas.forEach(area => {
-                    const opt = document.createElement('option');
-                    opt.value = area;
-                    opt.textContent = area.split('/').pop();
-                    if (area === areaPath) opt.selected = true;
-                    select.appendChild(opt);
-                });
-                select.onchange = (e) => {
-                    shelfPaths[s] = e.target.value;
-                    render();
-                };
-                header.appendChild(select);
-                shelfBox.appendChild(header);
-
-                const allChildren = state.items.filter(i => i.parent_path === areaPath);
-                let mgmtItem = allChildren.find(i => i.level === 'category' && i.id.endsWith('0'));
-                let physicalItems = allChildren.filter(i => i !== mgmtItem && (i.level === 'category' || i.level === 'id')).sort((a,b) => a.id.localeCompare(b.id));
-                let itemsToShow = physicalItems.filter(i => i.level === 'category');
-                if (itemsToShow.length === 0) {
-                    itemsToShow = physicalItems.filter(i => i.level === 'id');
-                }
-
-                for (let r = 0; r < SLOTS_PER_SHELF; r++) {
-                    const slotIndex = s * SLOTS_PER_SHELF + r;
-                    const slot = document.createElement('div');
-                    slot.className = 'slot';
-                    if (r === 0) {
-                        slot.classList.add('locked');
-                        if (mgmtItem) {
-                            slot.appendChild(createItemElement(mgmtItem, true));
-                        } else {
-                            const span = createText('span', null, 'Row 1 (Mgmt)');
-                            span.style.color = '#444';
-                            span.style.fontSize = '10px';
-                            slot.appendChild(span);
-                        }
-                    } else {
-                        slot.addEventListener('click', () => placeItem(slotIndex));
-                        let item = itemsToShow.find(i => i.physical_loc === slotIndex + 1);
-                        if (item) {
-                            slot.appendChild(createItemElement(item, false));
-                        } else {
-                            const span = createText('span', null, `Row ${r + 1}`);
-                            span.style.color = '#444';
-                            span.style.fontSize = '10px';
-                            slot.appendChild(span);
-                        }
-                    }
-                    shelfBox.appendChild(slot);
-                }
-
-                shelfContainer.appendChild(shelfBox);
-                grid.appendChild(shelfContainer);
-            }
-        }
-
-        function createItemElement(item, isLocked) {
-            const div = document.createElement('div');
-            div.className = 'item ' + getAreaClass(item.area) + (selectedItemId === item.id ? ' selected' : '');
-
-            const content = document.createElement('div');
-            content.className = 'item-content';
-
-            const idSpan = document.createElement('span');
-            idSpan.className = 'id';
-            idSpan.textContent = getDisplayId(item);
-
-            const titleSpan = document.createElement('span');
-            titleSpan.className = 'title';
-            titleSpan.textContent = item.title;
-
-            content.appendChild(idSpan);
-            content.appendChild(titleSpan);
-
-            content.addEventListener('click', (e) => { e.stopPropagation(); openModal(item); });
-            div.appendChild(content);
-
-            if (!isLocked) {
-                const selBtn = document.createElement('button');
-                selBtn.className = 'btn-select';
-                selBtn.innerText = '✥';
-                selBtn.title = 'Select to move';
-                selBtn.addEventListener('click', (e) => { e.stopPropagation(); selectedItemId = (selectedItemId === item.id) ? null : item.id; render(); });
-                div.appendChild(selBtn);
-            }
-
-            return div;
-        }
-
-        function placeItem(slotIndex) {
-            if (!selectedItemId) return;
-            if (slotIndex % SLOTS_PER_SHELF === 0) return;
-
-            const item = state.items.find(i => i.id === selectedItemId);
-            if (!item) return;
-
-            if (slotIndex === -1) {
-                item.physical_loc = 0;
-                selectedItemId = null;
-                render();
-                return;
-            }
-
-            const targetShelf = Math.floor(slotIndex / SLOTS_PER_SHELF);
-            const targetAreaPath = shelfPaths[targetShelf];
-            if (item.area !== targetAreaPath) {
-                alert('You cannot move an item to a shelf of a different Area.');
-                return;
-            }
-
-            const oldItem = state.items.find(i => i.physical_loc === slotIndex + 1);
-            if (oldItem) {
-                oldItem.physical_loc = item.physical_loc;
-            }
-
-            item.physical_loc = slotIndex + 1;
-            selectedItemId = null;
-            render();
-        }
-
-        function openModal(item) {
-            document.getElementById('modal').style.display = 'flex';
-            document.getElementById('modal-title').textContent = item.id ? `${item.id} ${item.title}` : item.title;
-            const content = document.getElementById('modal-content');
-            content.innerHTML = '';
-            const children = state.items.filter(i => i.parent_path === item.original_path);
-            children.sort((a,b) => {
-                if (a.is_file !== b.is_file) return a.is_file ? 1 : -1;
-                return a.id.localeCompare(b.id);
-            });
-            if (children.length === 0) {
-                const p = createText('p', null, 'No subfolders or files found here.');
-                p.style.color = '#888';
-                content.appendChild(p);
-                return;
-            }
-
-            children.forEach(child => {
-                const div = document.createElement('div');
-                if (child.is_file) {
-                    div.className = 'file-item';
-                    div.textContent = `📄 ${child.title}`;
-                } else {
-                    div.className = 'folder-item';
-                    div.textContent = `📁 ${child.id ? child.id + ' ' : ''}${child.title}`;
-                    div.addEventListener('click', () => openModal(child));
-                }
-                content.appendChild(div);
-            });
-        }
-
-        function closeModal() { document.getElementById('modal').style.display = 'none'; }
-
-        async function generateScript() {
-            const btn = document.getElementById('exportBtn');
-            btn.innerText = '...';
-            try {
-                const res = await fetch('/api/export', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(state)
-                });
-                const scriptText = await res.text();
-                const output = document.getElementById('output');
-                output.textContent = scriptText;
-                output.style.display = 'block';
-                btn.innerText = 'Export';
-                window.scrollTo(0, document.body.scrollHeight);
-            } catch (e) {
-                alert('Failed to generate script.');
-                btn.innerText = 'Export';
-            }
-        }
-
-        document.getElementById('exportBtn').addEventListener('click', generateScript);
-        // replace placeholders with numeric constants (from Rust)
-        (function injectConstants(){
-            const txt = document.documentElement.innerHTML;
-        })();
-
-        render();
-    </script>
+    renderMeta();
+    renderPool();
+    renderShelves();
+    updateStats();
+  })();
+  </script>
 </body>
 </html>
 "##;
-    // inject numeric constants so the JS runs without relying on undefined identifiers
     template
         .replace("JSON_DATA_HERE", &safe_json)
         .replace("__SHELF_COUNT__", &SHELF_COUNT.to_string())
