@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::config::*;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JdItem {
     pub id: String,
@@ -39,8 +41,12 @@ pub fn validate_index(index: &JdIndex) -> Vec<String> {
     let mut errors: Vec<String> = Vec::new();
 
     let areas: Vec<&JdItem> = index.items.iter().filter(|i| i.level == "area").collect();
-    if areas.len() != 3 {
-        errors.push(format!("Expected exactly 3 Areas (shelves), found {}.", areas.len()));
+    if areas.len() != SHELF_COUNT {
+        errors.push(format!(
+            "Expected exactly {} Areas (shelves), found {}.",
+            SHELF_COUNT,
+            areas.len()
+        ));
     }
 
     use std::collections::HashMap;
@@ -53,40 +59,62 @@ pub fn validate_index(index: &JdIndex) -> Vec<String> {
 
     for cat in &categories {
         if let Ok(num) = cat.id.parse::<usize>() {
-            if !(10..=39).contains(&num) {
-                errors.push(format!("Category id '{}' out of valid JD range (10..39).", cat.id));
+            if num < JD_AREA_MIN || num > JD_AREA_MAX {
+                errors.push(format!("Category id '{}' out of valid JD range ({}..{}).", cat.id, JD_AREA_MIN, JD_AREA_MAX));
             }
         } else {
             errors.push(format!("Category id '{}' is not a valid number.", cat.id));
         }
 
         if cat.id.ends_with('0') {
-            let valid_slots = [1usize, 11, 21];
-            if !valid_slots.contains(&cat.physical_loc) {
-                errors.push(format!("Management category '{}' is not in a management slot (physical_loc={}).", cat.id, cat.physical_loc));
+            if !MANAGEMENT_SLOTS.contains(&cat.physical_loc) {
+                errors.push(format!(
+                    "Management category '{}' is not in a management slot (physical_loc={}).",
+                    cat.id, cat.physical_loc
+                ));
             }
-        } else if [1usize, 11, 21].contains(&cat.physical_loc) {
-            errors.push(format!("Non-management category '{}' found in a management slot (physical_loc={}).", cat.id, cat.physical_loc));
+        } else if MANAGEMENT_SLOTS.contains(&cat.physical_loc) {
+            errors.push(format!(
+                "Non-management category '{}' found in a management slot (physical_loc={}).",
+                cat.id, cat.physical_loc
+            ));
         }
     }
 
-    let mut cats_per_shelf: [usize; 3] = [0, 0, 0];
+    let mut cats_per_shelf: [usize; SHELF_COUNT] = [0; SHELF_COUNT];
     for cat in &categories {
-        if cat.physical_loc >= 1 && cat.physical_loc <= 30 {
-            let shelf = (cat.physical_loc - 1) / 10;
+        if cat.physical_loc >= 1 && cat.physical_loc <= SHELF_COUNT * SLOTS_PER_SHELF {
+            let shelf = (cat.physical_loc - 1) / SLOTS_PER_SHELF;
             cats_per_shelf[shelf] += 1;
         }
     }
     for (idx, count) in cats_per_shelf.iter().enumerate() {
-        if *count > 10 {
-            errors.push(format!("Shelf {} has {} categories (including management) — exceeds 10 slots.", idx + 1, count));
+        if *count > MAX_CATEGORIES_PER_SHELF {
+            errors.push(format!(
+                "Shelf {} has {} categories (including management) — exceeds {} slots.",
+                idx + 1,
+                count,
+                MAX_CATEGORIES_PER_SHELF
+            ));
         }
-        let non_mgmt = categories.iter().filter(|c| {
-            let shelf = if c.physical_loc >= 1 && c.physical_loc <= 30 { (c.physical_loc - 1) / 10 } else { 99 };
-            shelf == idx && !c.id.ends_with('0')
-        }).count();
-        if non_mgmt > 9 {
-            errors.push(format!("Shelf {} has {} non-management categories — exceeds 9 allowed.", idx + 1, non_mgmt));
+        let non_mgmt = categories
+            .iter()
+            .filter(|c| {
+                let shelf = if c.physical_loc >= 1 && c.physical_loc <= SHELF_COUNT * SLOTS_PER_SHELF {
+                    (c.physical_loc - 1) / SLOTS_PER_SHELF
+                } else {
+                    usize::MAX
+                };
+                shelf == idx && !c.id.ends_with('0')
+            })
+            .count();
+        if non_mgmt > MAX_NON_MGMT_CATEGORIES {
+            errors.push(format!(
+                "Shelf {} has {} non-management categories — exceeds {} allowed.",
+                idx + 1,
+                non_mgmt,
+                MAX_NON_MGMT_CATEGORIES
+            ));
         }
     }
 
@@ -95,18 +123,27 @@ pub fn validate_index(index: &JdIndex) -> Vec<String> {
             let prefix = &item.id[..pos];
             if let Some(parent) = path_map.get(item.parent_path.as_str()) {
                 if parent.level != "category" {
-                    errors.push(format!("ID '{}' parent is not a category: parent_path='{}' parent_level='{}'.", item.id, item.parent_path, parent.level));
+                    errors.push(format!(
+                        "ID '{}' parent is not a category: parent_path='{}' parent_level='{}'.",
+                        item.id, item.parent_path, parent.level
+                    ));
                 } else if parent.id != prefix {
-                    errors.push(format!("ID '{}' prefix '{}' does not match parent category id '{}'.", item.id, prefix, parent.id));
+                    errors.push(format!(
+                        "ID '{}' prefix '{}' does not match parent category id '{}'.",
+                        item.id, prefix, parent.id
+                    ));
                 }
             } else {
-                errors.push(format!("ID '{}' has no parent folder found in index (parent_path='{}').", item.id, item.parent_path));
+                errors.push(format!(
+                    "ID '{}' has no parent folder found in index (parent_path='{}').",
+                    item.id, item.parent_path
+                ));
             }
 
             let counter = ids_per_category.entry(prefix.to_string()).or_insert(0);
             *counter += 1;
-            if *counter > 10 {
-                errors.push(format!("Category '{}' has more than 10 IDs ({}).", prefix, *counter));
+            if *counter > MAX_IDS_PER_CATEGORY {
+                errors.push(format!("Category '{}' has more than {} IDs ({}).", prefix, MAX_IDS_PER_CATEGORY, *counter));
             }
         } else {
             errors.push(format!("ID '{}' malformed (expected 'XX.YY').", item.id));

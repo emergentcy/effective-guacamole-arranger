@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use walkdir::WalkDir;
 
+mod config;
 mod jd;
+use config::*;
 use jd::{JdIndex, JdItem, RenameItem};
 
 #[derive(Parser)]
@@ -29,14 +31,14 @@ enum Commands {
     Scan {
         #[arg(default_value = ".")]
         path: PathBuf,
-        #[arg(short, long, default_value = "state.json")]
+        #[arg(short, long, default_value = STATE_FILENAME)]
         output: PathBuf,
     },
     /// Boots a local web server to visually arrange the library
     Serve {
-        #[arg(default_value = "state.json")]
+        #[arg(default_value = STATE_FILENAME)]
         state: PathBuf,
-        #[arg(short, long, default_value_t = 3001)]
+        #[arg(short, long, default_value_t = DEFAULT_SERVE_PORT)]
         port: u16,
     },
     /// Suggests shorter names for long files and generates a rename script
@@ -46,7 +48,7 @@ enum Commands {
         /// Boot a web UI to review and edit names before exporting
         #[arg(short, long)]
         gui: bool,
-        #[arg(short, long, default_value_t = 3002)]
+        #[arg(short, long, default_value_t = DEFAULT_TIDY_PORT)]
         port: u16,
     },
 }
@@ -91,11 +93,11 @@ async fn main() {
                 if level == "category" || level == "id" {
                     let base_id = if level == "category" { id.clone() } else { id.split('.').next().unwrap_or(&id).to_string() };
                     if let Ok(num) = base_id.parse::<usize>() {
-                        if num >= 10 && num <= 39 {
+                        if num >= JD_AREA_MIN && num <= JD_AREA_MAX {
                             let decade = num / 10; // 1 for 10-19, 2 for 20-29, etc.
                             let row = num % 10;    // 0, 1, 2, ..., 9
                             // Slot mapping: 10->1, 11->2, ..., 19->10, 20->11, ...
-                            physical_loc = (decade - 1) * 10 + row + 1;
+                            physical_loc = (decade - 1) * SLOTS_PER_SHELF + row + 1;
                         }
                     }
                 }
@@ -117,7 +119,7 @@ async fn main() {
             fs::write(&output, serde_json::to_string_pretty(&index).unwrap()).unwrap();
             println!("✅ Found {} total items. Saved to {:?}", index.items.len(), output);
         }
-        Commands::Serve { state: _, port } => {
+        Commands::Serve { state, port } => {
             println!("Starting server on http://127.0.0.1:{}", port);
             let app = Router::new()
                 .route("/", get(render_ui))
@@ -127,7 +129,7 @@ async fn main() {
             axum::serve(listener, app).await.unwrap();
         }
         Commands::Tidy { path, gui, port } => {
-            println!("Scanning for long filenames in: {:?}", path);
+            println!("Scanning for long filenames in: {:?}" , path);
             let mut renames = Vec::new();
 
             for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
@@ -158,8 +160,8 @@ async fn main() {
                 axum::serve(listener, app).await.unwrap();
             } else {
                 let script = generate_tidy_script(&renames);
-                fs::write("rename_script.sh", script).unwrap();
-                println!("✅ Generated rename_script.sh. Review it and run: bash rename_script.sh");
+                fs::write(RENAME_SCRIPT, script).unwrap();
+                println!("✅ Generated {}. Review it and run: bash {}", RENAME_SCRIPT, RENAME_SCRIPT);
             }
         }
     }
@@ -267,7 +269,7 @@ fn propose_short_name(filename: &str) -> String {
 }
 
 fn generate_tidy_script(items: &[RenameItem]) -> String {
-    let mut script = String::from("#!/usr/bin/env bash\necho 'Renaming files...'\n\n");
+    let mut script = String::from(format!("{}echo 'Renaming files...'\n\n", SHELL_HEADER));
     for item in items {
         let dir = std::path::Path::new(&item.old_path)
             .parent()
@@ -290,7 +292,7 @@ async fn export_tidy_script(Json(items): Json<Vec<RenameItem>>) -> impl IntoResp
 }
 
 async fn render_ui() -> impl IntoResponse {
-    let json_str = fs::read_to_string("state.json").unwrap_or_else(|_| "{\"items\":[]}".to_string());
+    let json_str = fs::read_to_string(STATE_FILENAME).unwrap_or_else(|_| "{\"items\":[]}".to_string());
     let html = generate_html(&json_str);
     (
         [(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")],
@@ -307,8 +309,8 @@ async fn export_script(Json(index): Json<JdIndex>) -> impl IntoResponse {
         return (StatusCode::BAD_REQUEST, msg);
     }
 
-    let mut script = String::from("#!/usr/bin/env bash\necho 'Updating JD Library...'\n\n");
-    script.push_str(&format!("mkdir -p {}\n\n", jd::shell_quote("shelf")));
+    let mut script = String::from(format!("{}echo 'Updating JD Library...'\n\n", SHELL_HEADER));
+    script.push_str(&format!("mkdir -p {}\n\n", jd::shell_quote(SHELF_DIR)));
     
     for item in index.items.iter() {
         if item.physical_loc > 0 && item.level == "category" {
@@ -317,12 +319,12 @@ async fn export_script(Json(index): Json<JdIndex>) -> impl IntoResponse {
             }
 
             let slot_index = item.physical_loc - 1;
-            let new_id = (slot_index / 10 + 1) * 10 + (slot_index % 10);
+            let new_id = (slot_index / SLOTS_PER_SHELF + 1) * SLOTS_PER_SHELF + (slot_index % SLOTS_PER_SHELF);
             let safe_title = item.title.replace('/', "_");
             let new_name = format!("{:02} - {} {}", item.physical_loc, new_id, safe_title);
 
             let from = jd::shell_quote(&item.original_path);
-            let to = jd::shell_quote(&format!("shelf/{}", new_name));
+            let to = jd::shell_quote(&format!("{}/{}", SHELF_DIR, new_name));
             script.push_str(&format!("mv {} {}\n", from, to));
         }
     }
@@ -522,8 +524,8 @@ fn generate_html(json_data: &str) -> String {
         function getDisplayId(item) {
             if (item.physical_loc > 0 && (item.level === 'category' || item.level === 'id')) {
                 const slot_index = item.physical_loc - 1;
-                const decade = Math.floor(slot_index / 10) + 1;
-                const row = (slot_index % 10);
+                const decade = Math.floor(slot_index / SLOTS_PER_SHELF) + 1;
+                const row = (slot_index % SLOTS_PER_SHELF);
                 if (item.level === 'category') {
                     return `${decade}${row}`;
                 } else {
@@ -553,7 +555,7 @@ fn generate_html(json_data: &str) -> String {
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
 
-            for (let s = 0; s < 3; s++) {
+            for (let s = 0; s < SHELF_COUNT; s++) {
                 const shelfContainer = document.createElement('div');
                 shelfContainer.className = 'shelf';
                 const areaPath = shelfPaths[s];
@@ -585,8 +587,8 @@ fn generate_html(json_data: &str) -> String {
                     itemsToShow = physicalItems.filter(i => i.level === 'id');
                 }
 
-                for (let r = 0; r < 10; r++) {
-                    const slotIndex = s * 10 + r;
+                for (let r = 0; r < SLOTS_PER_SHELF; r++) {
+                    const slotIndex = s * SLOTS_PER_SHELF + r;
                     const slot = document.createElement('div');
                     slot.className = 'slot';
                     if (r === 0) {
@@ -644,7 +646,7 @@ fn generate_html(json_data: &str) -> String {
 
         function placeItem(slotIndex) {
             if (!selectedItemId) return;
-            if (slotIndex % 10 === 0) return;
+            if (slotIndex % SLOTS_PER_SHELF === 0) return;
 
             const item = state.items.find(i => i.id === selectedItemId);
             if (!item) return;
@@ -656,7 +658,7 @@ fn generate_html(json_data: &str) -> String {
                 return;
             }
 
-            const targetShelf = Math.floor(slotIndex / 10);
+            const targetShelf = Math.floor(slotIndex / SLOTS_PER_SHELF);
             const targetAreaPath = shelfPaths[targetShelf];
             if (item.area !== targetAreaPath) {
                 alert('You cannot move an item to a shelf of a different Area.');
