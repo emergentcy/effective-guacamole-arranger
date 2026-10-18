@@ -13,6 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use walkdir::WalkDir;
 
+mod jd;
+use jd::{JdIndex, JdItem, RenameItem};
+
 #[derive(Parser)]
 #[command(author, version, about = "Johnny.Decimal Library Wrangler")]
 struct Cli {
@@ -46,29 +49,6 @@ enum Commands {
         #[arg(short, long, default_value_t = 3002)]
         port: u16,
     },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct JdItem {
-    pub id: String,
-    pub title: String,
-    pub physical_loc: usize,
-    pub original_path: String,
-    pub area: String,
-    pub is_file: bool,
-    pub parent_path: String,
-    pub level: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct JdIndex {
-    pub items: Vec<JdItem>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RenameItem {
-    pub old_path: String,
-    pub new_name: String,
 }
 
 #[tokio::main]
@@ -297,10 +277,9 @@ fn generate_tidy_script(items: &[RenameItem]) -> String {
             .file_name()
             .unwrap()
             .to_string_lossy();
-        script.push_str(&format!(
-            "mv \"{}/{}\" \"{}/{}\"\n",
-            dir, old_name, dir, item.new_name
-        ));
+        let from = jd::shell_quote(&format!("{}/{}", dir, old_name));
+        let to = jd::shell_quote(&format!("{}/{}", dir, item.new_name));
+        script.push_str(&format!("mv {} {}\n", from, to));
     }
     script.push_str("\necho 'Done.'\n");
     script
@@ -319,29 +298,36 @@ async fn render_ui() -> impl IntoResponse {
     )
 }
 
+use axum::http::StatusCode;
+
 async fn export_script(Json(index): Json<JdIndex>) -> impl IntoResponse {
+    let errors = jd::validate_index(&index);
+    if !errors.is_empty() {
+        let msg = format!("Validation failed:\n{}", errors.join("\n"));
+        return (StatusCode::BAD_REQUEST, msg);
+    }
+
     let mut script = String::from("#!/usr/bin/env bash\necho 'Updating JD Library...'\n\n");
-    script.push_str("mkdir -p shelf\n\n");
+    script.push_str(&format!("mkdir -p {}\n\n", jd::shell_quote("shelf")));
     
-    for item in index.items {
-        // Only move Categories (folders that contain IDs)
+    for item in index.items.iter() {
         if item.physical_loc > 0 && item.level == "category" {
-            
-            // Skip Management folders (XX0) - they stay where they are
             if item.id.ends_with('0') {
                 continue;
             }
 
-            // Calculate the new JD ID based on the physical slot
             let slot_index = item.physical_loc - 1;
             let new_id = (slot_index / 10 + 1) * 10 + (slot_index % 10);
-            
-            let new_name = format!("{:02} - {} {}", item.physical_loc, new_id, item.title);
-            script.push_str(&format!("mv \"{}\" \"shelf/{}\"\n", item.original_path, new_name));
+            let safe_title = item.title.replace('/', "_");
+            let new_name = format!("{:02} - {} {}", item.physical_loc, new_id, safe_title);
+
+            let from = jd::shell_quote(&item.original_path);
+            let to = jd::shell_quote(&format!("shelf/{}", new_name));
+            script.push_str(&format!("mv {} {}\n", from, to));
         }
     }
     script.push_str("\necho 'Done. Look in the ./shelf/ folder.'\n");
-    script
+    (StatusCode::OK, script)
 }
 
 async fn render_tidy_ui_handler(State(renames): State<Arc<Vec<RenameItem>>>) -> impl IntoResponse {
@@ -435,12 +421,12 @@ fn generate_html(json_data: &str) -> String {
         .shelf-header { margin-bottom: 10px; text-align: center; }
         .shelf-header select { background: transparent; color: #00ccff; border: none; font-family: monospace; font-size: 14px; font-weight: bold; cursor: pointer; outline: none; text-align: center; }
         
-        .slot { flex: 1; min-height: 60px; border: 1px dashed #333; margin-bottom: 8px; border-radius: 4px; display: flex; flex-direction: column; justify-content: center; cursor: pointer; padding: 4px; box-sizing: border-box; }
+        .slot { flex: 1; min-height: 60px; border: 1px dashed #333; margin-bottom: 8px; border-radius: 4px; display: flex; flex-direction: column; justify-content: center; cursor: pointer; padding: 4px; }
         .slot:hover { background: #2a2a2a; }
         .slot.locked { cursor: default; border-style: solid; }
         .slot.locked:hover { background: transparent; }
         
-        .item { background: #333; padding: 8px; border-radius: 4px; width: 100%; border-left: 4px solid #00ccff; font-size: 12px; box-sizing: border-box; display: flex; justify-content: space-between; align-items: flex-start; overflow-wrap: anywhere; }
+        .item { background: #333; padding: 8px; border-radius: 4px; width: 100%; border-left: 4px solid #00ccff; font-size: 12px; box-sizing: border-box; display: flex; justify-content: space-between; }
         .item.selected { border: 2px solid #00ff00; background: #1a331a; }
         .item-content { flex: 1; min-width: 0; cursor: pointer; }
         .item span.id { color: #00ccff; font-weight: bold; display: block; margin-bottom: 4px; font-size: 14px; }
@@ -460,10 +446,10 @@ fn generate_html(json_data: &str) -> String {
         .area-math { border-left-color: #ff00ff !important; }
         .area-system { border-left-color: #ff9900 !important; background: #2a1f16; }
 
-        #stats-bar { position: fixed; bottom: 0; left: 0; width: 100%; background: #222; border-top: 2px solid #444; color: #888; font-size: 12px; display: flex; justify-content: space-around; padding: 10px 0; box-sizing: border-box; z-index: 50; }
+        #stats-bar { position: fixed; bottom: 0; left: 0; width: 100%; background: #222; border-top: 2px solid #444; color: #888; font-size: 12px; display: flex; justify-content: space-around; padding: 8px 0; }
         #stats-bar span { color: #fff; font-weight: bold; }
 
-        #modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(17,17,17,0.95); z-index: 100; flex-direction: column; padding: 15px; box-sizing: border-box; overflow-y: auto; }
+        #modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(17,17,17,0.95); z-index: 100; flex-direction: column; padding: 15px; box-sizing: border-box; }
         #modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 2px solid #444; padding-bottom: 10px; }
         #modal-title { color: #00ccff; font-weight: bold; font-size: 18px; }
         #modal-close { background: #ff4444; color: #fff; border: none; padding: 8px 12px; border-radius: 4px; font-weight: bold; cursor: pointer; }
@@ -511,12 +497,8 @@ fn generate_html(json_data: &str) -> String {
     <script>
         const state = JSON.parse(document.getElementById('state-data').textContent);
         
-        // Extract physical areas and sort them
         const areas = [...new Set(state.items.filter(i => i.level === 'area' && !i.title.includes('System')).map(i => i.original_path))].sort();
-        
-        // Initial shelf mapping
         let shelfPaths = [areas[0], areas[1], areas[2]];
-        
         let selectedItemId = null;
 
         state.items.forEach(i => { if (i.title) i.title = i.title.replace(/\s+/g, ' ').trim(); });
@@ -537,7 +519,6 @@ fn generate_html(json_data: &str) -> String {
             return "";
         }
 
-        // Calculate display ID for UI (allows live swapping)
         function getDisplayId(item) {
             if (item.physical_loc > 0 && (item.level === 'category' || item.level === 'id')) {
                 const slot_index = item.physical_loc - 1;
@@ -546,7 +527,7 @@ fn generate_html(json_data: &str) -> String {
                 if (item.level === 'category') {
                     return `${decade}${row}`;
                 } else {
-                    return `${decade}${row}.${item.id.split('.')[1] || '00'}`; // Preserve the .XX part for IDs
+                    return `${decade}${row}.${item.id.split('.')[1] || '00'}`;
                 }
             }
             return item.id;
@@ -554,8 +535,6 @@ fn generate_html(json_data: &str) -> String {
 
         function render() {
             updateStats();
-
-            // Meta Drawer
             const metaList = document.getElementById('meta-list');
             metaList.innerHTML = '';
             const sysArea = state.items.find(i => i.level === 'area' && i.title.includes('System'));
@@ -565,33 +544,26 @@ fn generate_html(json_data: &str) -> String {
                 sysChildren.forEach(item => metaList.appendChild(createItemElement(item, false)));
             }
 
-            // Pool
             const pool = document.getElementById('pool');
             pool.innerHTML = '<div class="pool-title">Unassigned Items</div>';
-            
-            // Find any Category/ID that belongs to a physical area but isn't placed
             const unassigned = state.items.filter(i => i.physical_loc === 0 && (i.level === 'category' || i.level === 'id') && i.area !== sysArea.original_path);
             if (unassigned.length === 0) pool.innerHTML += '<span style="color:#444;">(All placed)</span>';
             unassigned.forEach(item => pool.appendChild(createItemElement(item, false)));
 
-            // Grid
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
 
             for (let s = 0; s < 3; s++) {
                 const shelfContainer = document.createElement('div');
                 shelfContainer.className = 'shelf';
-                
                 const areaPath = shelfPaths[s];
                 if (!areaPath) continue;
 
                 const shelfBox = document.createElement('div');
                 shelfBox.className = 'shelf-box';
 
-                // Header with Dropdown
                 const header = document.createElement('div');
                 header.className = 'shelf-header';
-                
                 const select = document.createElement('select');
                 select.innerHTML = `<option value="">-- Select Area --</option>`;
                 areas.forEach(area => {
@@ -605,18 +577,11 @@ fn generate_html(json_data: &str) -> String {
                 header.appendChild(select);
                 shelfBox.appendChild(header);
 
-                // Get all children of this Area
                 const allChildren = state.items.filter(i => i.parent_path === areaPath);
-                
-                // Find management folder (Category ending in 0)
                 let mgmtItem = allChildren.find(i => i.level === 'category' && i.id.endsWith('0'));
-                
-                // Get physical items (Categories first, fallback to IDs if no Categories)
                 let physicalItems = allChildren.filter(i => i !== mgmtItem && (i.level === 'category' || i.level === 'id')).sort((a,b) => a.id.localeCompare(b.id));
-                
                 let itemsToShow = physicalItems.filter(i => i.level === 'category');
                 if (itemsToShow.length === 0) {
-                    // If there are no Categories, show IDs directly
                     itemsToShow = physicalItems.filter(i => i.level === 'id');
                 }
 
@@ -624,29 +589,16 @@ fn generate_html(json_data: &str) -> String {
                     const slotIndex = s * 10 + r;
                     const slot = document.createElement('div');
                     slot.className = 'slot';
-                    
                     if (r === 0) {
-                        // Row 1 is locked for Management
                         slot.classList.add('locked');
                         if (mgmtItem) {
-                            slot.appendChild(createItemElement(mgmtItem, true)); // locked=true
+                            slot.appendChild(createItemElement(mgmtItem, true));
                         } else {
                             slot.innerHTML = `<span style="color:#444; font-size:10px; text-align:center;">Row 1 (Mgmt)</span>`;
                         }
                     } else {
                         slot.onclick = () => placeItem(slotIndex);
-                        
-                        // Find the item that lives in this slot
                         let item = itemsToShow.find(i => i.physical_loc === slotIndex + 1);
-                        
-                        // If it's an unassigned item in the pool, we can display it in its default slot
-                        if (!item && itemsToShow.length > 0) {
-                            // Optional: Auto-place unassigned items based on their default position
-                            // For now, leave empty until user moves them from pool, or auto-assign them.
-                            // Let's auto-assign if they have a default ID matching the slot.
-                            // Actually, the scanner already sets physical_loc if the ID matches. So they are placed!
-                        }
-
                         if (item) {
                             slot.appendChild(createItemElement(item, false));
                         } else {
@@ -664,24 +616,21 @@ fn generate_html(json_data: &str) -> String {
         function createItemElement(item, isLocked) {
             const div = document.createElement('div');
             div.className = 'item ' + getAreaClass(item.area) + (selectedItemId === item.id ? ' selected' : '');
-            
             const content = document.createElement('div');
             content.className = 'item-content';
             const displayId = getDisplayId(item);
             content.innerHTML = `<span class="id">${displayId}</span><span class="title">${item.title}</span>`;
-            
             content.onclick = (e) => {
                 e.stopPropagation();
                 openModal(item);
             };
-
             div.appendChild(content);
 
             if (!isLocked) {
                 const selBtn = document.createElement('button');
                 selBtn.className = 'btn-select';
                 selBtn.innerText = '✥';
-                selBtn.title = "Select to move";
+                selBtn.title = 'Select to move';
                 selBtn.onclick = (e) => {
                     e.stopPropagation();
                     selectedItemId = (selectedItemId === item.id) ? null : item.id;
@@ -695,8 +644,6 @@ fn generate_html(json_data: &str) -> String {
 
         function placeItem(slotIndex) {
             if (!selectedItemId) return;
-            
-            // Prevent dropping into the locked first row of any shelf
             if (slotIndex % 10 === 0) return;
 
             const item = state.items.find(i => i.id === selectedItemId);
@@ -712,13 +659,13 @@ fn generate_html(json_data: &str) -> String {
             const targetShelf = Math.floor(slotIndex / 10);
             const targetAreaPath = shelfPaths[targetShelf];
             if (item.area !== targetAreaPath) {
-                alert("You cannot move an item to a shelf of a different Area.");
+                alert('You cannot move an item to a shelf of a different Area.');
                 return;
             }
 
             const oldItem = state.items.find(i => i.physical_loc === slotIndex + 1);
             if (oldItem) {
-                oldItem.physical_loc = item.physical_loc; 
+                oldItem.physical_loc = item.physical_loc;
             }
 
             item.physical_loc = slotIndex + 1;
@@ -729,16 +676,13 @@ fn generate_html(json_data: &str) -> String {
         function openModal(item) {
             document.getElementById('modal').style.display = 'flex';
             document.getElementById('modal-title').innerText = item.id ? `${item.id} ${item.title}` : item.title;
-            
             const content = document.getElementById('modal-content');
             content.innerHTML = '';
-            
             const children = state.items.filter(i => i.parent_path === item.original_path);
             children.sort((a,b) => {
                 if (a.is_file !== b.is_file) return a.is_file ? 1 : -1;
                 return a.id.localeCompare(b.id);
             });
-
             if (children.length === 0) {
                 content.innerHTML = '<p style="color:#888;">No subfolders or files found here.</p>';
                 return;
@@ -752,7 +696,7 @@ fn generate_html(json_data: &str) -> String {
                 } else {
                     div.className = 'folder-item';
                     div.innerHTML = `📁 ${child.id ? child.id + ' ' : ''}${child.title}`;
-                    div.onclick = () => openModal(child); 
+                    div.onclick = () => openModal(child);
                 }
                 content.appendChild(div);
             });
@@ -778,7 +722,7 @@ fn generate_html(json_data: &str) -> String {
                 btn.innerText = 'Export';
                 window.scrollTo(0, document.body.scrollHeight);
             } catch (e) {
-                alert("Failed to generate script.");
+                alert('Failed to generate script.');
                 btn.innerText = 'Export';
             }
         }
