@@ -129,7 +129,7 @@ async fn main() {
             axum::serve(listener, app).await.unwrap();
         }
         Commands::Tidy { path, gui, port } => {
-            println!("Scanning for long filenames in: {:?}" , path);
+            println!("Scanning for long filenames in: {}" , path.display());
             let mut renames = Vec::new();
 
             for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
@@ -302,6 +302,11 @@ async fn render_ui() -> impl IntoResponse {
 
 use axum::http::StatusCode;
 
+fn escape_json_for_script(json: &str) -> String {
+    // Prevent </script> from ending the script tag when embedding JSON directly in HTML
+    json.replace("</script>", "<\\/script>")
+}
+
 async fn export_script(Json(index): Json<JdIndex>) -> impl IntoResponse {
     let errors = jd::validate_index(&index);
     if !errors.is_empty() {
@@ -337,7 +342,9 @@ async fn render_tidy_ui_handler(State(renames): State<Arc<Vec<RenameItem>>>) -> 
 }
 
 fn generate_tidy_html(items: &[RenameItem]) -> String {
+    // Embed the JSON inside a <script type="application/json"> tag and read it via textContent.
     let json_data = serde_json::to_string(items).unwrap();
+    let safe_json = escape_json_for_script(&json_data);
     let template = r##"
 <!DOCTYPE html>
 <html lang="en">
@@ -357,26 +364,51 @@ fn generate_tidy_html(items: &[RenameItem]) -> String {
 <body>
     <h2>Tidy Library</h2>
     <p style="color: #888; font-size: 12px;">Review the proposed names below. Edit them freely, then click Export.</p>
-    <button onclick="generateScript()">Export Rename Script</button>
+    <button id="exportBtn">Export Rename Script</button>
+
     <div id="list"></div>
     <div id="output"></div>
 
+    <script id="tidy-data" type="application/json">JSON_DATA_HERE</script>
     <script>
-        const items = JSON_DATA_HERE;
+        const items = JSON.parse(document.getElementById('tidy-data').textContent || '[]');
         const list = document.getElementById('list');
+        const exportBtn = document.getElementById('exportBtn');
 
-        items.forEach((item, index) => {
-            const row = document.createElement('div');
-            row.className = 'file-row';
-            row.innerHTML = `<div class="old-name">${item.old_path}</div><input type="text" id="input-${index}" value="${item.new_name}" />`;
-            list.appendChild(row);
-        });
+        function renderList() {
+            list.innerHTML = '';
+            if (items.length === 0) {
+                const p = document.createElement('div');
+                p.style.color = '#888';
+                p.textContent = '(No files to tidy)';
+                list.appendChild(p);
+                return;
+            }
+
+            items.forEach((item, index) => {
+                const row = document.createElement('div');
+                row.className = 'file-row';
+
+                const oldDiv = document.createElement('div');
+                oldDiv.className = 'old-name';
+                oldDiv.textContent = item.old_path;
+
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.id = `input-${index}`;
+                input.value = item.new_name;
+
+                row.appendChild(oldDiv);
+                row.appendChild(input);
+                list.appendChild(row);
+            });
+        }
 
         async function generateScript() {
-            const btn = document.querySelector('button');
-            btn.innerText = 'Generating...';
+            exportBtn.textContent = 'Generating...';
             items.forEach((item, index) => {
-                item.new_name = document.getElementById(`input-${index}`).value;
+                const el = document.getElementById(`input-${index}`);
+                if (el) item.new_name = el.value;
             });
             try {
                 const res = await fetch('/api/export_tidy', {
@@ -386,22 +418,26 @@ fn generate_tidy_html(items: &[RenameItem]) -> String {
                 });
                 const scriptText = await res.text();
                 const output = document.getElementById('output');
-                output.innerText = scriptText;
+                output.textContent = scriptText;
                 output.style.display = 'block';
-                btn.innerText = 'Export Rename Script';
+                exportBtn.textContent = 'Export Rename Script';
             } catch (e) {
-                alert("Failed to generate script.");
-                btn.innerText = 'Export Rename Script';
+                alert('Failed to generate script.');
+                exportBtn.textContent = 'Export Rename Script';
             }
         }
+
+        exportBtn.addEventListener('click', generateScript);
+        renderList();
     </script>
 </body>
 </html>
 "##;
-    template.replace("JSON_DATA_HERE", &json_data)
+    template.replace("JSON_DATA_HERE", &safe_json)
 }
 
 fn generate_html(json_data: &str) -> String {
+    let safe_json = escape_json_for_script(json_data);
     let template = r##"
 <!DOCTYPE html>
 <html lang="en">
@@ -465,7 +501,7 @@ fn generate_html(json_data: &str) -> String {
 
     <div class="header">
         <h2>JD Wrangler</h2>
-        <button class="export" onclick="generateScript()">Export</button>
+        <button class="export" id="exportBtn">Export</button>
     </div>
 
     <details class="meta-drawer" open>
@@ -497,8 +533,11 @@ fn generate_html(json_data: &str) -> String {
     </div>
 
     <script>
-        const state = JSON.parse(document.getElementById('state-data').textContent);
-        
+        const state = JSON.parse(document.getElementById('state-data').textContent || '{"items":[]}');
+
+        const SHELF_COUNT = __SHELF_COUNT__;
+        const SLOTS_PER_SHELF = __SLOTS_PER_SHELF__;
+
         const areas = [...new Set(state.items.filter(i => i.level === 'area' && !i.title.includes('System')).map(i => i.original_path))].sort();
         let shelfPaths = [areas[0], areas[1], areas[2]];
         let selectedItemId = null;
@@ -506,10 +545,10 @@ fn generate_html(json_data: &str) -> String {
         state.items.forEach(i => { if (i.title) i.title = i.title.replace(/\s+/g, ' ').trim(); });
 
         function updateStats() {
-            document.getElementById('stat-areas').innerText = state.items.filter(i => i.level === 'area').length;
-            document.getElementById('stat-cats').innerText = state.items.filter(i => i.level === 'category').length;
-            document.getElementById('stat-ids').innerText = state.items.filter(i => i.level === 'id').length;
-            document.getElementById('stat-files').innerText = state.items.filter(i => i.is_file).length;
+            document.getElementById('stat-areas').textContent = state.items.filter(i => i.level === 'area').length;
+            document.getElementById('stat-cats').textContent = state.items.filter(i => i.level === 'category').length;
+            document.getElementById('stat-ids').textContent = state.items.filter(i => i.level === 'id').length;
+            document.getElementById('stat-files').textContent = state.items.filter(i => i.is_file).length;
         }
 
         function getAreaClass(areaPath) {
@@ -519,6 +558,13 @@ fn generate_html(json_data: &str) -> String {
             if (areaPath.includes("Math")) return "area-math";
             if (areaPath.includes("System")) return "area-system";
             return "";
+        }
+
+        function createText(tag, className, text) {
+            const el = document.createElement(tag);
+            if (className) el.className = className;
+            el.textContent = text;
+            return el;
         }
 
         function getDisplayId(item) {
@@ -547,10 +593,16 @@ fn generate_html(json_data: &str) -> String {
             }
 
             const pool = document.getElementById('pool');
-            pool.innerHTML = '<div class="pool-title">Unassigned Items</div>';
-            const unassigned = state.items.filter(i => i.physical_loc === 0 && (i.level === 'category' || i.level === 'id') && i.area !== sysArea.original_path);
-            if (unassigned.length === 0) pool.innerHTML += '<span style="color:#444;">(All placed)</span>';
-            unassigned.forEach(item => pool.appendChild(createItemElement(item, false)));
+            // clear pool but keep title
+            Array.from(pool.children).forEach((c, idx) => { if (!c.classList || !c.classList.contains('pool-title')) c.remove(); });
+            const unassigned = state.items.filter(i => i.physical_loc === 0 && (i.level === 'category' || i.level === 'id') && (!sysArea || i.area !== sysArea.original_path));
+            if (unassigned.length === 0) {
+                const span = createText('div', null, '(All placed)');
+                span.style.color = '#444';
+                pool.appendChild(span);
+            } else {
+                unassigned.forEach(item => pool.appendChild(createItemElement(item, false)));
+            }
 
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
@@ -567,10 +619,16 @@ fn generate_html(json_data: &str) -> String {
                 const header = document.createElement('div');
                 header.className = 'shelf-header';
                 const select = document.createElement('select');
-                select.innerHTML = `<option value="">-- Select Area --</option>`;
+                const defaultOpt = document.createElement('option');
+                defaultOpt.value = '';
+                defaultOpt.textContent = '-- Select Area --';
+                select.appendChild(defaultOpt);
                 areas.forEach(area => {
-                    const sel = (area === areaPath) ? 'selected' : '';
-                    select.innerHTML += `<option value="${area}" ${sel}>${area.split('/').pop()}</option>`;
+                    const opt = document.createElement('option');
+                    opt.value = area;
+                    opt.textContent = area.split('/').pop();
+                    if (area === areaPath) opt.selected = true;
+                    select.appendChild(opt);
                 });
                 select.onchange = (e) => {
                     shelfPaths[s] = e.target.value;
@@ -596,15 +654,21 @@ fn generate_html(json_data: &str) -> String {
                         if (mgmtItem) {
                             slot.appendChild(createItemElement(mgmtItem, true));
                         } else {
-                            slot.innerHTML = `<span style="color:#444; font-size:10px; text-align:center;">Row 1 (Mgmt)</span>`;
+                            const span = createText('span', null, 'Row 1 (Mgmt)');
+                            span.style.color = '#444';
+                            span.style.fontSize = '10px';
+                            slot.appendChild(span);
                         }
                     } else {
-                        slot.onclick = () => placeItem(slotIndex);
+                        slot.addEventListener('click', () => placeItem(slotIndex));
                         let item = itemsToShow.find(i => i.physical_loc === slotIndex + 1);
                         if (item) {
                             slot.appendChild(createItemElement(item, false));
                         } else {
-                            slot.innerHTML = `<span style="color:#444; font-size:10px; text-align:center;">Row ${r + 1}</span>`;
+                            const span = createText('span', null, `Row ${r + 1}`);
+                            span.style.color = '#444';
+                            span.style.fontSize = '10px';
+                            slot.appendChild(span);
                         }
                     }
                     shelfBox.appendChild(slot);
@@ -618,14 +682,22 @@ fn generate_html(json_data: &str) -> String {
         function createItemElement(item, isLocked) {
             const div = document.createElement('div');
             div.className = 'item ' + getAreaClass(item.area) + (selectedItemId === item.id ? ' selected' : '');
+
             const content = document.createElement('div');
             content.className = 'item-content';
-            const displayId = getDisplayId(item);
-            content.innerHTML = `<span class="id">${displayId}</span><span class="title">${item.title}</span>`;
-            content.onclick = (e) => {
-                e.stopPropagation();
-                openModal(item);
-            };
+
+            const idSpan = document.createElement('span');
+            idSpan.className = 'id';
+            idSpan.textContent = getDisplayId(item);
+
+            const titleSpan = document.createElement('span');
+            titleSpan.className = 'title';
+            titleSpan.textContent = item.title;
+
+            content.appendChild(idSpan);
+            content.appendChild(titleSpan);
+
+            content.addEventListener('click', (e) => { e.stopPropagation(); openModal(item); });
             div.appendChild(content);
 
             if (!isLocked) {
@@ -633,11 +705,7 @@ fn generate_html(json_data: &str) -> String {
                 selBtn.className = 'btn-select';
                 selBtn.innerText = '✥';
                 selBtn.title = 'Select to move';
-                selBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    selectedItemId = (selectedItemId === item.id) ? null : item.id;
-                    render();
-                };
+                selBtn.addEventListener('click', (e) => { e.stopPropagation(); selectedItemId = (selectedItemId === item.id) ? null : item.id; render(); });
                 div.appendChild(selBtn);
             }
 
@@ -677,7 +745,7 @@ fn generate_html(json_data: &str) -> String {
 
         function openModal(item) {
             document.getElementById('modal').style.display = 'flex';
-            document.getElementById('modal-title').innerText = item.id ? `${item.id} ${item.title}` : item.title;
+            document.getElementById('modal-title').textContent = item.id ? `${item.id} ${item.title}` : item.title;
             const content = document.getElementById('modal-content');
             content.innerHTML = '';
             const children = state.items.filter(i => i.parent_path === item.original_path);
@@ -686,7 +754,9 @@ fn generate_html(json_data: &str) -> String {
                 return a.id.localeCompare(b.id);
             });
             if (children.length === 0) {
-                content.innerHTML = '<p style="color:#888;">No subfolders or files found here.</p>';
+                const p = createText('p', null, 'No subfolders or files found here.');
+                p.style.color = '#888';
+                content.appendChild(p);
                 return;
             }
 
@@ -694,22 +764,20 @@ fn generate_html(json_data: &str) -> String {
                 const div = document.createElement('div');
                 if (child.is_file) {
                     div.className = 'file-item';
-                    div.innerHTML = `📄 ${child.title}`;
+                    div.textContent = `📄 ${child.title}`;
                 } else {
                     div.className = 'folder-item';
-                    div.innerHTML = `📁 ${child.id ? child.id + ' ' : ''}${child.title}`;
-                    div.onclick = () => openModal(child);
+                    div.textContent = `📁 ${child.id ? child.id + ' ' : ''}${child.title}`;
+                    div.addEventListener('click', () => openModal(child));
                 }
                 content.appendChild(div);
             });
         }
 
-        function closeModal() {
-            document.getElementById('modal').style.display = 'none';
-        }
+        function closeModal() { document.getElementById('modal').style.display = 'none'; }
 
         async function generateScript() {
-            const btn = document.querySelector('button.export');
+            const btn = document.getElementById('exportBtn');
             btn.innerText = '...';
             try {
                 const res = await fetch('/api/export', {
@@ -719,7 +787,7 @@ fn generate_html(json_data: &str) -> String {
                 });
                 const scriptText = await res.text();
                 const output = document.getElementById('output');
-                output.innerText = scriptText;
+                output.textContent = scriptText;
                 output.style.display = 'block';
                 btn.innerText = 'Export';
                 window.scrollTo(0, document.body.scrollHeight);
@@ -729,10 +797,20 @@ fn generate_html(json_data: &str) -> String {
             }
         }
 
+        document.getElementById('exportBtn').addEventListener('click', generateScript);
+        // replace placeholders with numeric constants (from Rust)
+        (function injectConstants(){
+            const txt = document.documentElement.innerHTML;
+        })();
+
         render();
     </script>
 </body>
 </html>
 "##;
-    template.replace("JSON_DATA_HERE", json_data)
+    // inject numeric constants so the JS runs without relying on undefined identifiers
+    template
+        .replace("JSON_DATA_HERE", &safe_json)
+        .replace("__SHELF_COUNT__", &SHELF_COUNT.to_string())
+        .replace("__SLOTS_PER_SHELF__", &SLOTS_PER_SHELF.to_string())
 }
